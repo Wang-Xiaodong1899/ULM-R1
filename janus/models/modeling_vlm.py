@@ -445,10 +445,6 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         # [bs * 2 * parallel_size, max_len, dim]
         inputs_embeds = self.language_model.get_input_embeddings()(tokens)
 
-        # if completion_type == "mm_sim":
-        #     t2i_inputs_embeds = inputs_embeds.clone()[mask]  # [bs * parallel_size, max_len, dim]
-        #     t2i_inputs_embeds = t2i_inputs_embeds[:, :-1, :]
-
         generated_tokens = torch.zeros(
             (bs * parallel_size, image_token_num_per_image), dtype=torch.int
         ).to(device)  # discrete image IDs
@@ -510,12 +506,12 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         return generated_tokens, completions
 
     @torch.inference_mode()
-    def t2i_generate_wo_cfg(
+    def t2i_generate(
             self,
             input_ids,  # [bs, len]
             attention_mask=None,  # [bs, len]
             # for t2i
-            parallel_size: int = 16,  # equal to num_return_sequences, =1:
+            parallel_size: int = 1,  # equal to num_return_sequences, =1:
             temperature: float = 1,
             cfg_weight: float = 5,
             image_token_num_per_image: int = 576,  # 24x24
@@ -523,33 +519,27 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
             patch_size: int = 16,
             pad_id: int = 100002,
             seed=42,
-            completion_type="mm_sim",
     ):
         generator = torch.Generator(device='cuda').manual_seed(seed)
         device = input_ids.device
         bs, max_len = input_ids.size()
 
-        # [bs * 2 * parallel_size, max_len]
-        attention_mask = torch.cat([
-            attention_mask, torch.ones((bs, image_token_num_per_image), device=device)
-        ], dim=-1)
-
-        # [bs * 2 * parallel_size, max_len]
-        attention_mask = attention_mask.repeat_interleave(2 * parallel_size, dim=0)
-        tokens = input_ids.repeat_interleave(2 * parallel_size, dim=0)
-        mask = torch.arange(bs * 2 * parallel_size, device=device) % 2 == 1
+        tokens = input_ids.repeat_interleave(2, dim=0)
+        mask = torch.arange(bs * 2, device=device) % 2 == 1  # unconditional input
         tokens[mask, 1:-1] = pad_id
 
-        # [bs * 2 * parallel_size, max_len, dim]
+        # [bs * 2, max_len, dim]
         inputs_embeds = self.language_model.get_input_embeddings()(tokens)
 
-        if completion_type == "mm_sim":
-            t2i_inputs_embeds = inputs_embeds.clone()[mask]  # [bs * parallel_size, max_len, dim]
-            t2i_inputs_embeds = t2i_inputs_embeds[:, :-1, :]
+        # [bs * 2, max_len + 576]
+        attention_mask = torch.cat([
+            attention_mask, torch.ones((bs, image_token_num_per_image), device=device)
+        ], dim=-1)  # because of left padding
+        # [bs * 2, max_len]
+        attention_mask = attention_mask.repeat_interleave(2, dim=0)
 
-        generated_tokens = torch.zeros(
-            (bs * parallel_size, image_token_num_per_image), dtype=torch.int
-        ).to(device)  # discrete image IDs
+        # discrete image IDs
+        generated_tokens = torch.zeros((bs, image_token_num_per_image), dtype=torch.int).to(device)
         for i in range(image_token_num_per_image):  # Autoregressive
             outputs = self.language_model.model(
                 inputs_embeds=inputs_embeds,
@@ -574,22 +564,18 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
                 [next_token.unsqueeze(dim=1), next_token.unsqueeze(dim=1)], dim=1
             ).view(-1)
 
-            img_embeds = self.prepare_gen_img_embeds(next_token)  # [2 * bs * parallel_size, dim]
+            img_embeds = self.prepare_gen_img_embeds(next_token)  # [2 * bs, dim]
             inputs_embeds = img_embeds.unsqueeze(dim=1)
 
         # completions
-        completions = {}
-        if completion_type == "image":
-            dec = self.gen_vision_model.decode_code(
-                generated_tokens.to(dtype=torch.int),
-                shape=[bs * parallel_size, 8, img_size // patch_size, img_size // patch_size]
-            )
-            dec = dec.to(torch.float32).cpu().numpy().transpose(0, 2, 3, 1)
-            # [bs * parallel_size, 384, 384, 3]
-
-            dec = np.clip((dec + 1) / 2 * 255, 0, 255).astype(np.uint8)
-
-            completions['generated_image'] = dec
+        dec = self.gen_vision_model.decode_code(
+            generated_tokens.to(dtype=torch.int),
+            shape=[bs, 8, img_size // patch_size, img_size // patch_size]
+        )
+        dec = dec.to(torch.float32).cpu().numpy().transpose(0, 2, 3, 1)
+        # [bs, 384, 384, 3]
+        dec = np.clip((dec + 1) / 2 * 255, 0, 255).astype(np.uint8)
+        completions = [Image.fromarray(d) for d in dec]
 
         return generated_tokens, completions
 

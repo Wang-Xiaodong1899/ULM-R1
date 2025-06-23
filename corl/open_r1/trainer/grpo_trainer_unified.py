@@ -54,7 +54,8 @@ if is_deepspeed_available():
 if is_peft_available():
     from peft import PeftConfig, get_peft_model
 
-from janus.models import VLChatProcessor, MultiModalityCausalLM
+from janus.models import VLChatProcessor
+from corl.open_r1.rewards.r_t2i import T2ICycleConsistencyReward
 
 # What we call a reward function is a callable that takes
 # a list of prompts and completions and returns a list of rewards.
@@ -104,7 +105,6 @@ class JanusProUnifiedGRPOTrainer(Trainer):
             task_args: ScriptArguments = None,
     ):
         self.task_args = task_args
-        self.task_format = task_args.task_format
 
         # Args
         if args is None:
@@ -113,7 +113,7 @@ class JanusProUnifiedGRPOTrainer(Trainer):
             args = GRPOConfig(f"{model_name}-GRPO")
 
         # ******************* Models *******************
-        # 1. Trained policy model
+        # Trained policy model
         model_init_kwargs = args.model_init_kwargs or {}
         model_init_kwargs["attn_implementation"] = attn_implementation
         if isinstance(model, str):
@@ -148,37 +148,16 @@ class JanusProUnifiedGRPOTrainer(Trainer):
                     "You passed `model_init_kwargs` to the `GRPOConfig`, but your model is already "
                     "instantiated. This argument can only be used when the `model` argument is a string."
                 )
-
-        # **************************************
+        # ********************************************
         model = self.init_trainable_parameters(model)
+        # ********************************************
 
         if peft_config is not None:
             if not is_peft_available():
                 raise ImportError("PEFT is required to use `peft_config`. Run `pip install peft`")
             model = get_peft_model(model, peft_config)
 
-        # 2. Reference model
-        self.beta = args.beta
-        if self.beta == 0.0:
-            # If beta is 0.0, the reference model is not needed
-            self.ref_model = None
-        elif is_deepspeed_zero3_enabled():
-            if "Janus" in model_id:
-                self.ref_model = AutoModelForCausalLM.from_pretrained(
-                    model_id, trust_remote_code=True)
-            else:
-                self.ref_model = AutoModelForCausalLM.from_pretrained(
-                    model_id, **model_init_kwargs)
-
-        elif is_peft_model(model):
-            # If PEFT is used, the reference model is not needed since the adapter
-            # can be disabled to revert to the initial model.
-            self.ref_model = None
-        else:
-            # If PEFT config is not provided, create a reference model based on the initial model.
-            self.ref_model = create_reference_model(model)
-
-        # 3. Processing class
+        # Processing class
         if processing_class is None:
             if "Janus" in model_id:
                 processing_class = VLChatProcessor.from_pretrained(model_id)
@@ -188,12 +167,14 @@ class JanusProUnifiedGRPOTrainer(Trainer):
                 processing_class = AutoTokenizer.from_pretrained(
                     model.config._name_or_path, padding_side="left"
                 )
-
         # ******************* Reward functions *******************
         if not isinstance(reward_funcs, list):
             reward_funcs = [reward_funcs]
         for i, reward_func in enumerate(reward_funcs):
-            if isinstance(reward_func, str):
+            if isinstance(reward_func, str) and 'CycleConsistency' in reward_func:
+                reward_funcs[i] = T2ICycleConsistencyReward(self.task_args)
+
+            elif isinstance(reward_func, str):
                 reward_funcs[i] = AutoModelForSequenceClassification.from_pretrained(
                     reward_func, num_labels=1, **model_init_kwargs
                 )
@@ -201,7 +182,7 @@ class JanusProUnifiedGRPOTrainer(Trainer):
         self.t2i_reward_funcs = [rf for rf in reward_funcs if "t2i" in rf.__name__]
         self.mm2t_reward_funcs = [rf for rf in reward_funcs if "t2i" not in rf.__name__]
 
-        # 1. Reward weights
+        # Reward weights
         if args.reward_weights is not None:  # list[float]
             if len(args.reward_weights) != len(reward_funcs):
                 raise ValueError(
@@ -215,12 +196,20 @@ class JanusProUnifiedGRPOTrainer(Trainer):
             # self.reward_weights = torch.ones(len(reward_funcs), dtype=torch.float32)
             self.t2i_reward_weights = torch.ones(len(self.t2i_reward_funcs), dtype=torch.float32)
             self.mm2t_reward_weights = torch.ones(len(self.mm2t_reward_funcs), dtype=torch.float32)
-        # 2. Reward
-        self.init_external_model_for_rewards()
 
         # Data collator
         def data_collator(features):  # No data collation is needed in GRPO
             return features
+
+        # ******************* Training arguments *******************
+        self.num_iterations = args.num_iterations  # = 𝜇 in the GRPO paper
+        self.epsilon_low = args.epsilon  # defalt=0.2
+        self.epsilon_high = args.epsilon_high if args.epsilon_high is not None else args.epsilon
+        self.max_prompt_length = args.max_prompt_length  # prompt+image
+        self.max_completion_length = args.max_completion_length  # = |o_i| in GRPO
+        self.num_generations = args.num_generations  # = G in the GRPO paper
+        # param for .generate()
+        self.temperature = args.temperature
 
         # The trainer estimates the number of FLOPs (floating-point operations) using the number of
         # elements in the input tensor associated with the key "input_ids". However, in GRPO,
@@ -230,13 +219,6 @@ class JanusProUnifiedGRPOTrainer(Trainer):
         # warning, we set the "estimate_tokens" key in the model's "warnings_issued" dictionary to
         # True. This acts as a flag to indicate that the warning has already been issued.
         model.warnings_issued["estimate_tokens"] = True
-
-        # Initialize the metrics
-        self._metrics = defaultdict(list)
-
-        # self._total_train_tokens = 0
-        # self.log_completions = args.log_completions
-        # self.num_completions_to_print = args.num_completions_to_print
 
         super().__init__(
             model=model,
@@ -249,16 +231,33 @@ class JanusProUnifiedGRPOTrainer(Trainer):
             optimizers=optimizers,
         )
 
-        # ******************* Training arguments *******************
-        self.num_iterations = args.num_iterations  # = 𝜇 in the GRPO paper
-        self.epsilon_low = args.epsilon  # defalt=0.2
-        self.epsilon_high = args.epsilon_high if args.epsilon_high is not None else args.epsilon
+        # Reference model
+        self.beta = args.beta
+        if self.beta == 0.0:
+            # If beta is 0.0, the reference model is not needed
+            self.ref_model = None
+        elif is_deepspeed_zero3_enabled():
+            if "Janus" in model_id:
+                self.ref_model = AutoModelForCausalLM.from_pretrained(
+                    model_id, trust_remote_code=True)
+            else:
+                self.ref_model = AutoModelForCausalLM.from_pretrained(
+                    model_id, **model_init_kwargs)
+        elif is_peft_model(model):
+            # If PEFT is used, the reference model is not needed since the adapter
+            # can be disabled to revert to the initial model.
+            self.ref_model = None
+        else:
+            # If PEFT config is not provided, create a reference model based on the initial model.
+            self.ref_model = create_reference_model(model)
 
-        self.max_prompt_length = args.max_prompt_length  # prompt+image
-        self.max_completion_length = args.max_completion_length  # = |o_i| in GRPO
-        self.num_generations = args.num_generations  # = G in the GRPO paper
-        # param for .generate()
-        self.temperature = args.temperature
+        # Initialize the metrics
+        self._metrics = defaultdict(list)
+
+        # Ensure each process receives a unique seed to prevent duplicate completions when
+        # generating with transformers if num_generations exceeds per_device_train_batch_size.
+        # We could skip it if we use vLLM, but it's safer to set it in all cases.
+        set_seed(args.seed, device_specific=True)
 
         self.generation_config = GenerationConfig(
             max_new_tokens=self.max_completion_length,
@@ -287,11 +286,6 @@ class JanusProUnifiedGRPOTrainer(Trainer):
             "seed": self.args.seed,
         }
 
-        # Ensure each process receives a unique seed to prevent duplicate completions when
-        # generating with transformers if num_generations exceeds per_device_train_batch_size.
-        # We could skip it if we use vLLM, but it's safer to set it in all cases.
-        set_seed(args.seed, device_specific=True)
-
         # Gradient accumulation requires scaled loss. Normally, loss scaling in the parent class
         # depends on whether the model accepts loss-related kwargs.
         # Since we compute our own loss, this check is irrelevant.
@@ -309,22 +303,28 @@ class JanusProUnifiedGRPOTrainer(Trainer):
             self.add_callback(SyncRefModelCallback(
                 ref_model=self.ref_model, accelerator=self.accelerator))
 
+        for i, reward_func in enumerate(self.t2i_reward_funcs):
+            if isinstance(reward_func, PreTrainedModel):
+                self.t2i_reward_funcs[i] = self.accelerator.prepare_model(
+                    reward_func, evaluation_mode=True
+                )
+            elif isinstance(reward_func, T2ICycleConsistencyReward):
+                reward_func.load_external_model(self.accelerator.device)
+
     @staticmethod
     def init_trainable_parameters(model):
-        # model.language_model.config._attn_implementation == attn_implementation
-
-        # fix gen_vision_model and vision_model
-        for param in model.gen_vision_model.parameters():
-            param.requires_grad = False
+        # fix und
         for param in model.vision_model.parameters():
-            param.requires_grad = False
-
-        # fix gen_aligner and aligner
-        for param in model.gen_aligner.parameters():
             param.requires_grad = False
         for param in model.aligner.parameters():
             param.requires_grad = False
 
+        # fix gen
+        for param in model.gen_vision_model.parameters():
+            param.requires_grad = False
+        # fix gen_aligner
+        for param in model.gen_aligner.parameters():
+            param.requires_grad = False
         # fix gen_head and gen_embed ???
         for param in model.gen_head.parameters():
             param.requires_grad = False
@@ -332,73 +332,10 @@ class JanusProUnifiedGRPOTrainer(Trainer):
             param.requires_grad = False
 
         # trainable: llm, (gen_embed, gen_head)
-
-        model.language_model.config.use_cache = False
-        model.language_model.gradient_checkpointing_enable()
+        # model.language_model.config.use_cache = False
+        # model.language_model.gradient_checkpointing_enable()
 
         return model
-
-    def init_external_model_for_rewards(self):
-        if "t2i_clip_reward" in self.task_args.reward_funcs:
-            print("using reward_func: t2i_clip_reward")
-            # Load reward model
-            from corl.open_r1.rewards.open_clip import create_model_and_transforms, get_tokenizer
-            clip_model, _, clip_preprocess = create_model_and_transforms(
-                'ViT-H-14',
-                f'{self.task_args.model_ckpt_dir}/open_clip_pytorch_model.bin',
-                precision='amp',
-                device="cuda",
-                jit=False,
-                force_quick_gelu=False,
-                force_custom_text=False,
-                force_patch_dropout=False,
-                force_image_size=None,
-                pretrained_image=False,
-                image_mean=None,
-                image_std=None,
-                light_augmentation=True,
-                aug_cfg={},
-                output_dict=True,
-                with_score_predictor=False,
-                with_region_predictor=False
-            )
-            clip_tokenizer = get_tokenizer('ViT-H-14')
-            clip_model = clip_model.to("cuda")
-            clip_model.eval()
-
-            self.clip_preprocess = clip_preprocess
-            self.clip_tokenizer = clip_tokenizer
-            self.clip_model = clip_model
-
-        if ("t2i_cycle_reward" in self.task_args.reward_funcs or
-                "t2i_bid_cycle_reward" in self.task_args.reward_funcs
-        ):
-            print("using reward_func: cycle_reward")
-            from transformers import BlipProcessor, BlipForConditionalGeneration
-
-            blip_processor = BlipProcessor.from_pretrained(
-                f"{self.task_args.model_ckpt_dir}/{self.task_args.blip_model_ckpt}")
-            blip_model = BlipForConditionalGeneration.from_pretrained(
-                f"{self.task_args.model_ckpt_dir}/{self.task_args.blip_model_ckpt}")
-
-            blip_model = blip_model.to("cuda")
-            blip_model.eval()
-
-            self.blip_processor = blip_processor
-            self.blip_model = blip_model
-
-            from torchmetrics.text.bert import BERTScore
-            from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
-
-            scorer = BERTScore(
-                model_name_or_path=f"{self.task_args.model_ckpt_dir}/bert-base-uncased",
-                device="cuda",
-            )
-            lpip_metric = LearnedPerceptualImagePatchSimilarity(
-                net_type='vgg', normalize=True).to("cuda")
-
-            self.bert_scorer = scorer
-            self.lpip_metric = lpip_metric
 
     def _set_signature_columns_if_needed(self):
         # If `self.args.remove_unused_columns` is True, non-signature columns are removed.
@@ -506,9 +443,6 @@ class JanusProUnifiedGRPOTrainer(Trainer):
         mm2t_images_in_prompt_mask = mm2t_prompt_inputs["images_seq_mask"]  # [bs, n_prompt+n_img]
         mm2t_pixel_values = mm2t_prompt_inputs["pixel_values"]  # [bs, 1, 3, 384, 384]
         mm2t_images_emb_mask = mm2t_prompt_inputs["images_emb_mask"]  # [bs, 1, 576]
-        # for prompt, soft_prompt in zip(mm2t_prompts, mm2t_prompt_inputs["sft_format"]):
-        #     if prompt[0]['role'] == "<|User|>":
-        #         prompt[0]['content'] = soft_prompt
         if self.max_prompt_length is not None:
             mm2t_prompt_ids = mm2t_prompt_ids[:, -self.max_prompt_length:]
             mm2t_prompt_mask = mm2t_prompt_mask[:, -self.max_prompt_length:]
@@ -516,11 +450,7 @@ class JanusProUnifiedGRPOTrainer(Trainer):
 
         # ******************************************************************************
         # === Generate completion ===
-        torch.set_grad_enabled(False)
         with unwrap_model_for_generation(self.model_wrapped, self.accelerator) as unwrapped_model:
-            unwrapped_model.language_model.config.use_cache = False
-            unwrapped_model.language_model.gradient_checkpointing_disable()
-
             # generate images: discrete image IDs,
             t2i_completion_ids, t2i_completions = unwrapped_model.t2i_generate_parallel(
                 input_ids=t2i_prompt_ids, attention_mask=t2i_prompt_mask,
@@ -575,27 +505,44 @@ class JanusProUnifiedGRPOTrainer(Trainer):
         )
 
         # ******************************************************************************
+        with torch.inference_mode():
+            if self.num_iterations > 1:
+                mm2t_old_per_token_logps, t2i_old_per_token_logps = self._get_per_token_logps(
+                    self.model,
+                    mm2t_input_ids=mm2t_prompt_completion_ids,
+                    mm2t_images_seq_mask=mm2t_images_seq_mask,
+                    mm2t_pixel_values=mm2t_pixel_values,
+                    mm2t_images_emb_mask=mm2t_images_emb_mask,
+                    mm2t_attention_mask=mm2t_attention_mask,
+                    mm2t_logits_to_keep=mm2t_logits_to_keep,
+
+                    t2i_inputs_ids=t2i_prompt_ids,
+                    t2i_attention_mask=t2i_prompt_mask,
+                    t2i_discrete_img_ids=t2i_completion_ids,
+                    t2i_logits_to_keep=t2i_logits_to_keep,
+                )
+            else:
+                mm2t_old_per_token_logps = None
+                t2i_old_per_token_logps = None
+
+        # ******************************************************************************
         # === Compute rewards ===
         t2i_prompts = [pp for pp in t2i_prompts for _ in range(self.num_generations)]
         t2i_rewards_per_func = torch.zeros(
             len(t2i_prompts), len(self.t2i_reward_funcs), device=device)
         for i, (reward_func) in enumerate(self.t2i_reward_funcs):
-            if "t2i_bidirectional_cycle" in reward_func.__name__:
+            if "t2i_CycleConsistency" in reward_func.__name__:
                 reward_kwargs = {
                     key: [example[key] for example in inputs for _ in range(self.num_generations)]
                     for key in inputs[0].keys() if key in ["real_image"]
                 }
                 # [bs * parallel_size, 3, 384, 384]
                 output_reward_func = reward_func(
-                    completions=t2i_completions,
-                    prompts=t2i_prompts,
-                    caption_model=self.blip_model,
-                    caption_processor=self.blip_processor,
-                    bert_scorer=self.bert_scorer,
-                    lpip_metric=self.lpip_metric,
+                    completions=t2i_completions, prompts=t2i_prompts,
+                    mmgpt=self.model, processing_class=self.processing_class,
                     **reward_kwargs
                 )
-            elif "t2i_match_reward" in reward_func.__name__:
+            elif "t2i_match" in reward_func.__name__:
                 output_reward_func = reward_func(
                     completions=t2i_completions, prompts=t2i_prompts,
                     mmgpt=self.model, processing_class=self.processing_class,
@@ -621,25 +568,6 @@ class JanusProUnifiedGRPOTrainer(Trainer):
                     mmgpt=self.model, processing_class=self.processing_class,
                     gen_config=self.generation_config,
                     **reward_kwargs
-                )
-            elif "t2i_clip" in reward_func.__name__:
-                # [bs * parallel_size, 3, 384, 384]
-                output_reward_func = reward_func(
-                    completions=t2i_completions,
-                    prompts=t2i_prompts,
-                    clip_model=self.clip_model,
-                    clip_tokenizer=self.clip_tokenizer,
-                    # **reward_kwargs
-                )
-            elif "t2i_cycle" in reward_func.__name__:
-                # [bs * parallel_size, 3, 384, 384]
-                output_reward_func = reward_func(
-                    completions=t2i_completions,
-                    prompts=t2i_prompts,
-                    caption_model=self.blip_model,
-                    caption_processor=self.blip_processor,
-                    bert_scorer=self.bert_scorer,
-                    # **reward_kwargs
                 )
             else:
                 raise ValueError(f"Unknown reward function: {reward_func}")
@@ -670,7 +598,9 @@ class JanusProUnifiedGRPOTrainer(Trainer):
             output_r_func = [
                 reward if reward is not None else torch.nan for reward in output_r_func
             ]  # Convert None values to NaN
-            mm2t_rewards_per_func[:, i] = torch.tensor(output_r_func, dtype=torch.float32, device=device)
+            mm2t_rewards_per_func[:, i] = torch.tensor(
+                output_r_func, dtype=torch.float32, device=device)
+
         mm2t_rewards_per_func = gather(mm2t_rewards_per_func)
         mm2t_rewards = (mm2t_rewards_per_func * self.mm2t_reward_weights.to(
             device).unsqueeze(0)).nansum(dim=1)
@@ -743,88 +673,22 @@ class JanusProUnifiedGRPOTrainer(Trainer):
 
         for i, rf_name in enumerate([rf.__name__ for rf in self.t2i_reward_funcs]):
             mean_rewards = torch.nanmean(t2i_rewards_per_func[:, i]).item()
-            self._metrics[f"rewards_t2i/{rf_name}/mean"].append(mean_rewards)
+            self._metrics[f"rewards/{rf_name}/mean"].append(mean_rewards)
             # std_rewards = nanstd(t2i_rewards_per_func[:, i]).item()
-            # self._metrics[f"rewards_t2i/{rf_name}/std"].append(std_rewards)
+            # self._metrics[f"rewards/{rf_name}/std"].append(std_rewards)
 
         for i, rf_name in enumerate([rf.__name__ for rf in self.mm2t_reward_funcs]):
             mean_rewards = torch.nanmean(mm2t_rewards_per_func[:, i]).item()
-            self._metrics[f"rewards_mm2t/{rf_name}/mean"].append(mean_rewards)
+            self._metrics[f"rewards/{rf_name}/mean"].append(mean_rewards)
             # std_rewards = nanstd(mm2t_rewards_per_func[:, i]).item()
-            # self._metrics[f"rewards_mm2t/{rf_name}/std"].append(std_rewards)
-
-        # ******************************************************************************
-        # joint forward
-        # ******************************************************************************
-        # === 4. Compute logprobs ===
-        torch.set_grad_enabled(True)
-        with torch.inference_mode():
-            if self.num_iterations > 1:
-                self.model.module.language_model.gradient_checkpointing_enable()
-                mm2t_old_per_token_logps, t2i_old_per_token_logps = self._get_per_token_logps(
-                    self.model,
-                    mm2t_input_ids=mm2t_prompt_completion_ids,
-                    mm2t_images_seq_mask=mm2t_images_seq_mask,
-                    mm2t_pixel_values=mm2t_pixel_values,
-                    mm2t_images_emb_mask=mm2t_images_emb_mask,
-                    mm2t_attention_mask=mm2t_attention_mask,
-                    mm2t_logits_to_keep=mm2t_logits_to_keep,
-
-                    t2i_inputs_ids=t2i_prompt_ids,
-                    t2i_attention_mask=t2i_prompt_mask,
-                    t2i_discrete_img_ids=t2i_completion_ids,
-                    t2i_logits_to_keep=t2i_logits_to_keep,
-                )
-            else:
-                mm2t_old_per_token_logps = None
-                t2i_old_per_token_logps = None
-
-            if self.beta == 0.0:
-                mm2t_ref_per_token_logps = None
-                t2i_ref_per_token_logps = None
-            elif self.ref_model is not None:
-                self.ref_model.language_model.gradient_checkpointing_enable()
-                mm2t_ref_per_token_logps, t2i_ref_per_token_logps = self._get_per_token_logps(
-                    self.ref_model,
-                    mm2t_input_ids=mm2t_prompt_completion_ids,
-                    mm2t_images_seq_mask=mm2t_images_seq_mask,
-                    mm2t_pixel_values=mm2t_pixel_values,
-                    mm2t_images_emb_mask=mm2t_images_emb_mask,
-                    mm2t_attention_mask=mm2t_attention_mask,
-                    mm2t_logits_to_keep=mm2t_logits_to_keep,
-
-                    t2i_inputs_ids=t2i_prompt_ids,
-                    t2i_attention_mask=t2i_prompt_mask,
-                    t2i_discrete_img_ids=t2i_completion_ids,
-                    t2i_logits_to_keep=t2i_logits_to_keep,
-                )
-            else:  # for peft
-                with self.accelerator.unwrap_model(self.model).disable_adapter():
-                    mm2t_ref_per_token_logps, t2i_ref_per_token_logps = self._get_per_token_logps(
-                        self.model,
-                        mm2t_input_ids=mm2t_prompt_completion_ids,
-                        mm2t_images_seq_mask=mm2t_images_seq_mask,
-                        mm2t_pixel_values=mm2t_pixel_values,
-                        mm2t_images_emb_mask=mm2t_images_emb_mask,
-                        mm2t_attention_mask=mm2t_attention_mask,
-                        mm2t_logits_to_keep=mm2t_logits_to_keep,
-
-                        t2i_inputs_ids=t2i_prompt_ids,
-                        t2i_attention_mask=t2i_prompt_mask,
-                        t2i_discrete_img_ids=t2i_completion_ids,
-                        t2i_logits_to_keep=t2i_logits_to_keep,
-                    )
+            # self._metrics[f"rewards/{rf_name}/std"].append(std_rewards)
 
         return {
             "mm2t_prompt_completion_ids": mm2t_prompt_completion_ids,
             "mm2t_attention_mask": mm2t_attention_mask,
-            "mm2t_logits_to_keep": mm2t_logits_to_keep,
-            # loss
             "mm2t_completion_mask": mm2t_completion_mask,
             "mm2t_old_per_token_logps": mm2t_old_per_token_logps,
-            "mm2t_ref_per_token_logps": mm2t_ref_per_token_logps,
             "mm2t_advantages": mm2t_advantages,
-            # image
             "mm2t_pixel_values": mm2t_pixel_values,
             "mm2t_images_seq_mask": mm2t_images_seq_mask,
             "mm2t_images_emb_mask": mm2t_images_emb_mask,
@@ -832,16 +696,16 @@ class JanusProUnifiedGRPOTrainer(Trainer):
             "t2i_inputs_ids": t2i_prompt_ids,
             "t2i_attention_mask": t2i_prompt_mask,
             "t2i_discrete_img_ids": t2i_completion_ids,
-            "t2i_logits_to_keep": t2i_logits_to_keep,
-            # loss
             "t2i_completion_mask": t2i_completion_mask,
             "t2i_old_per_token_logps": t2i_old_per_token_logps,
-            "t2i_ref_per_token_logps": t2i_ref_per_token_logps,
             "t2i_advantages": t2i_advantages,
             "unified_advantages":unified_advantages,
         }
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        mm2t_logits_to_keep = inputs["mm2t_completion_mask"].size(1)
+        t2i_logits_to_keep = inputs["t2i_completion_mask"].size(1)
+
         mm2t_per_token_logps, t2i_per_token_logps = self._get_per_token_logps(
             model,
             mm2t_input_ids=inputs["mm2t_prompt_completion_ids"],
@@ -849,58 +713,98 @@ class JanusProUnifiedGRPOTrainer(Trainer):
             mm2t_images_seq_mask=inputs["mm2t_images_seq_mask"],
             mm2t_pixel_values=inputs["mm2t_pixel_values"],
             mm2t_images_emb_mask=inputs["mm2t_images_emb_mask"],
-            mm2t_logits_to_keep=inputs["mm2t_logits_to_keep"],
+            mm2t_logits_to_keep=mm2t_logits_to_keep,
 
             t2i_inputs_ids=inputs["t2i_inputs_ids"],
             t2i_attention_mask=inputs["t2i_attention_mask"],
             t2i_discrete_img_ids=inputs["t2i_discrete_img_ids"],
-            t2i_logits_to_keep=inputs["t2i_logits_to_keep"],
+            t2i_logits_to_keep=t2i_logits_to_keep,
         )
 
+        if self.beta != 0.0:
+            with torch.inference_mode():
+                if self.ref_model is not None:
+                    mm2t_ref_per_token_logps, t2i_ref_per_token_logps = self._get_per_token_logps(
+                        self.ref_model,
+                        mm2t_input_ids=inputs["mm2t_prompt_completion_ids"],
+                        mm2t_attention_mask=inputs["mm2t_attention_mask"],
+                        mm2t_images_seq_mask=inputs["mm2t_images_seq_mask"],
+                        mm2t_pixel_values=inputs["mm2t_pixel_values"],
+                        mm2t_images_emb_mask=inputs["mm2t_images_emb_mask"],
+                        mm2t_logits_to_keep=mm2t_logits_to_keep,
+
+                        t2i_inputs_ids=inputs["t2i_inputs_ids"],
+                        t2i_attention_mask=inputs["t2i_attention_mask"],
+                        t2i_discrete_img_ids=inputs["t2i_discrete_img_ids"],
+                        t2i_logits_to_keep=t2i_logits_to_keep,
+                    )
+                else:  # for peft
+                    with self.accelerator.unwrap_model(self.model).disable_adapter():
+                        mm2t_ref_per_token_logps, t2i_ref_per_token_logps = self._get_per_token_logps(
+                            self.model,
+                            mm2t_input_ids=inputs["mm2t_prompt_completion_ids"],
+                            mm2t_attention_mask=inputs["mm2t_attention_mask"],
+                            mm2t_images_seq_mask=inputs["mm2t_images_seq_mask"],
+                            mm2t_pixel_values=inputs["mm2t_pixel_values"],
+                            mm2t_images_emb_mask=inputs["mm2t_images_emb_mask"],
+                            mm2t_logits_to_keep=mm2t_logits_to_keep,
+
+                            t2i_inputs_ids=inputs["t2i_inputs_ids"],
+                            t2i_attention_mask=inputs["t2i_attention_mask"],
+                            t2i_discrete_img_ids=inputs["t2i_discrete_img_ids"],
+                            t2i_logits_to_keep=t2i_logits_to_keep,
+                        )
+            mm2t_per_token_kl = (
+                    torch.exp(mm2t_ref_per_token_logps - mm2t_per_token_logps) - (
+                        mm2t_ref_per_token_logps - mm2t_per_token_logps) - 1
+            )
+            t2i_per_token_kl = (
+                    torch.exp(t2i_ref_per_token_logps - t2i_per_token_logps) - (
+                        t2i_ref_per_token_logps - t2i_per_token_logps) - 1
+            )
         # Compute the loss
         mm2t_completion_mask = inputs["mm2t_completion_mask"]
         t2i_completion_mask = inputs["t2i_completion_mask"]
 
-        if self.num_iterations > 1:
-            mm2t_old_per_token_logps = inputs["mm2t_old_per_token_logps"]
-            t2i_old_per_token_logps = inputs["t2i_old_per_token_logps"]
-        else:
+        if inputs["mm2t_old_per_token_logps"] is None:
             mm2t_old_per_token_logps = mm2t_per_token_logps.detach()
+        else:
+            mm2t_old_per_token_logps = inputs["mm2t_old_per_token_logps"]
+        if inputs["t2i_old_per_token_logps"] is None:
             t2i_old_per_token_logps = t2i_per_token_logps.detach()
+        else:
+            t2i_old_per_token_logps = inputs["t2i_old_per_token_logps"]
 
         mm2t_advantages = inputs["mm2t_advantages"]
         t2i_advantages = inputs["t2i_advantages"]
         unified_advantages = inputs["unified_advantages"]
-        if self.task_args.unify_advantage and mm2t_advantages is not None and t2i_advantages is not None:
-            unified_advantages = t2i_advantages + 0.8 * mm2t_advantages
+        if unified_advantages is not None:
+            mm2t_per_token_loss = unified_advantages.unsqueeze(1) * (
+                    mm2t_per_token_logps - mm2t_old_per_token_logps  # [n, L]
+            ).exp()
+            t2i_per_token_loss = unified_advantages.unsqueeze(1) * (
+                    t2i_per_token_logps - t2i_old_per_token_logps  # [n, 576]
+            ).exp()
+        else: # mm2t_advantages is not None and t2i_advantages is not None
+            if self.task_args.unify_advantage:
+                unified_advantages = t2i_advantages + 0.8 * mm2t_advantages
 
-            mm2t_per_token_loss = unified_advantages.unsqueeze(1) * (
-                    mm2t_per_token_logps - mm2t_old_per_token_logps  # [n, L]
-            ).exp()
-            t2i_per_token_loss = unified_advantages.unsqueeze(1) * (
-                    t2i_per_token_logps - t2i_old_per_token_logps  # [n, 576]
-            ).exp()
-        elif self.task_args.unify_reward and unified_advantages is not None:
-            mm2t_per_token_loss = unified_advantages.unsqueeze(1) * (
-                    mm2t_per_token_logps - mm2t_old_per_token_logps  # [n, L]
-            ).exp()
-            t2i_per_token_loss = unified_advantages.unsqueeze(1) * (
-                    t2i_per_token_logps - t2i_old_per_token_logps  # [n, 576]
-            ).exp()
-        else:
-            mm2t_per_token_loss = mm2t_advantages.unsqueeze(1) * (
-                    mm2t_per_token_logps - mm2t_old_per_token_logps  # [n, L]
-            ).exp()
-            t2i_per_token_loss = t2i_advantages.unsqueeze(1) * (
-                    t2i_per_token_logps - t2i_old_per_token_logps  # [n, 576]
-            ).exp()
+                mm2t_per_token_loss = unified_advantages.unsqueeze(1) * (
+                        mm2t_per_token_logps - mm2t_old_per_token_logps  # [n, L]
+                ).exp()
+                t2i_per_token_loss = unified_advantages.unsqueeze(1) * (
+                        t2i_per_token_logps - t2i_old_per_token_logps  # [n, 576]
+                ).exp()
+            else:
+                mm2t_per_token_loss = mm2t_advantages.unsqueeze(1) * (
+                        mm2t_per_token_logps - mm2t_old_per_token_logps  # [n, L]
+                ).exp()
+                t2i_per_token_loss = t2i_advantages.unsqueeze(1) * (
+                        t2i_per_token_logps - t2i_old_per_token_logps  # [n, 576]
+                ).exp()
 
         if self.beta != 0.0:
-            mm2t_log_ratio = inputs["mm2t_ref_per_token_logps"] - mm2t_per_token_logps
-            mm2t_per_token_kl = mm2t_log_ratio.exp() - mm2t_log_ratio - 1.0
-
             mm2t_per_token_loss = -(mm2t_per_token_loss - self.beta * mm2t_per_token_kl)
-
             # Log the KL metric
             mm2t_mean_kl = ((mm2t_per_token_kl * mm2t_completion_mask).sum(
                 dim=1) / mm2t_completion_mask.sum(dim=1)).mean()
@@ -908,11 +812,7 @@ class JanusProUnifiedGRPOTrainer(Trainer):
                 self.accelerator.gather_for_metrics(mm2t_mean_kl).mean().item()
             )
 
-            t2i_log_ratio = inputs["t2i_ref_per_token_logps"] - t2i_per_token_logps
-            t2i_per_token_kl = t2i_log_ratio.exp() - t2i_log_ratio - 1.0
-
             t2i_per_token_loss = -(t2i_per_token_loss - self.beta * t2i_per_token_kl)
-
             t2i_mean_kl = ((t2i_per_token_kl * t2i_completion_mask).sum(
                 dim=1) / t2i_completion_mask.sum(dim=1)).mean()
             self._metrics["kl_t2i"].append(
@@ -923,10 +823,12 @@ class JanusProUnifiedGRPOTrainer(Trainer):
             t2i_per_token_loss = -t2i_per_token_loss
 
         # total loss
-        loss_mm2t = ((mm2t_per_token_loss * mm2t_completion_mask).sum(
-            dim=1) / mm2t_completion_mask.sum(dim=1)).mean()
-        loss_t2i = ((t2i_per_token_loss * t2i_completion_mask).sum(
-            dim=1) / t2i_completion_mask.sum(dim=1)).mean()
+        # loss_mm2t = ((mm2t_per_token_loss * mm2t_completion_mask).sum(
+        #     dim=1) / mm2t_completion_mask.sum(dim=1)).mean()
+        # loss_t2i = ((t2i_per_token_loss * t2i_completion_mask).sum(
+        #     dim=1) / t2i_completion_mask.sum(dim=1)).mean()
+        loss_mm2t = (mm2t_per_token_loss * mm2t_completion_mask).sum() / mm2t_completion_mask.sum().clamp(min=1.0)
+        loss_t2i = (t2i_per_token_loss * t2i_completion_mask).sum() / t2i_completion_mask.sum().clamp(min=1.0)
 
         return loss_mm2t + loss_t2i
 

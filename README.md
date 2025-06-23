@@ -17,8 +17,8 @@ CoRL is a GRPO-based RL framework designed to simultaneously enhance the generat
 
 ## 📢 Latest Updates
 
-- [01/06/2025] 📌 Core code of CoRL.
-
+- [2025-06-25] 📌 Code of [TTRL](./ttrl) for MM2T and T2I.
+- [2025-06-01] 📌 Core code of [CoRL](./corl).
 
 ## Environment 
 
@@ -50,33 +50,38 @@ pip install flash-attn --no-build-isolation
 - Unified RL 
 
 ```shell
-bash scripts/corl_unified.sh
+bash corl/scripts/corl_unified.sh
 ```
 
-[//]: # (### Stage II: Refined RL )
+---
+## Test-Time Reinforcement Learning (TTRL)
 
-[//]: # ()
-[//]: # (- Multimodal Understanding)
+We simply adapt the [TTRL](https://github.com/PRIME-RL/TTRL) algorithm to multimodal understanding and text-to-image generation, aiming to explore the potential of RL in enhancing both understanding and generation performance at inference time. 
 
-[//]: # ()
-[//]: # (```shell)
+>[!Tip] 
+>required: trl>=0.18.1
 
-[//]: # ()
-[//]: # (```)
+### multimodal understanding
 
-[//]: # (- MC-Format)
+```shell
+bash ttrl/scripts/mm2t_mmmu.sh
+bash ttrl/scripts/mm2t_mmstar.sh
+```
+|              | MMMU | MMStar |
+|:------------:|:----:|:------:|
+| Janus-Pro-1B | 36.3 |  43.1  |
+|    + TTRL    | 39.8 |        |
 
-[//]: # ()
-[//]: # (- OE-Format)
+### text-to-image generation
+```shell
+bash ttrl/scripts/t2i_geneval.sh
+bash ttrl/scripts/t2i_unieval.sh
+```
+|              | GenEval | UniEval (UniScore) |
+|:------------:|:-------:|:------------------:|
+| Janus-Pro-1B |  0.73   |       0.370        |
+|    + TTRL    |  0.76   |       0.455        |
 
-[//]: # ()
-[//]: # (- Text-to-Image Generation)
-
-[//]: # ()
-[//]: # (```shell)
-
-[//]: # ()
-[//]: # (```)
 
 ## Acknowledgement
 

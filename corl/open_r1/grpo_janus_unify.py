@@ -21,10 +21,7 @@ from trl import (
     GRPOConfig, ModelConfig, ScriptArguments,
     TrlParser, get_peft_config
 )
-
-# from corl.open_r1.trainer.grpo_trainer import JanusProJointGRPOTrainer
 from corl.open_r1.trainer.grpo_trainer_unified import JanusProUnifiedGRPOTrainer
-# from corl.open_r1.trainer.grpo_trainer_unified_v2 import JanusProUnifiedGRPOTrainer
 from corl.open_r1.rewards import reward_funcs_registry
 
 
@@ -59,15 +56,6 @@ class GRPOScriptArguments(ScriptArguments):
             "nargs": "+",
         },
     )
-    # for janus
-    delete_unused_module: bool = field(
-        default=False,
-        metadata={"help": "Whether to delete unused modules in janus."},
-    )
-    save_oom: bool = field(
-        default=False,
-        metadata={"help": "Whether to delete unused modules in janus."},
-    )
     task_format: Optional[str] = field(
         default="t2i",
         metadata={
@@ -89,14 +77,42 @@ class GRPOScriptArguments(ScriptArguments):
         default=True,
         metadata={"help": "Whether to delete unused modules in janus."},
     )
+    caption_cs_metrics: list[str] = field(
+        default_factory=lambda: ["jaccard", "bertscore"],
+        metadata={
+            "help": "List of caption consistency metrics. "
+                    "Possible values: 'jaccard', 'bertscore', 'SPICE'",
+            "nargs": "+",
+        },
+    )
+    using_simcse: bool = field(
+        default=False,
+        metadata={"help": "."},
+    )
+    using_image_cs: bool = field(
+        default=True,
+        metadata={"help": "."},
+    )
+    image_cs_metrics: list[str] = field(
+        default_factory=lambda: ["mse"],
+        metadata={
+            "help": "List of image consistency metrics. "
+                    "Possible values: 'lpips', 'mse', ''",
+            "nargs": "+",
+        },
+    )
+    using_external_caption_model: bool = field(
+        default=False,
+        metadata={"help": "."},
+    )
     model_ckpt_dir: str = field(
-        default="playground/checkpoint/"
+        default="XXX/checkpoint/"
     )
     blip_model_ckpt: str = field(
-        default="blip-image-captioning-base"
+        default="XXX/checkpoint/blip-image-captioning-base"
     )
     dataset_cache_dir: str = field(
-        default="playground/data/cache/"
+        default="XXX/data/cache/"
     )
 
 
@@ -110,10 +126,6 @@ def main(script_args, training_args, model_args):
         name=script_args.dataset_config,
         cache_dir=script_args.dataset_cache_dir,
     )
-
-    # # for debug
-    # sampled_dataset = dataset["train"].shuffle(seed=42).select(range(100))
-    # dataset["train"] = sampled_dataset
 
     # Format into conversation
     def make_conversation_t2i(example):
@@ -176,22 +188,19 @@ def main(script_args, training_args, model_args):
         dataset = dataset.map(make_conversation_joint)
 
     trainer_cls = JanusProUnifiedGRPOTrainer
+
     print("using: ", trainer_cls)
 
     # Initialize the GRPO trainer
     trainer = trainer_cls(
         model=model_args.model_name_or_path,
         reward_funcs=reward_funcs,
-
         args=training_args,
         train_dataset=dataset[script_args.dataset_train_split],
         eval_dataset=dataset[
             script_args.dataset_test_split] if training_args.eval_strategy != "no" else None,
-
         peft_config=get_peft_config(model_args),
         # callbacks=[ParameterInfoCallback()],
-
-        # for janus
         task_args=script_args,
     )
 

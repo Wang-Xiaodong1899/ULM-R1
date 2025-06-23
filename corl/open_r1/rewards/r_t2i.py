@@ -1,62 +1,205 @@
 import re
-
 import torch
 import torchmetrics.functional as metric_F
-
 from torchvision import transforms
 from open_clip import OPENAI_DATASET_MEAN, OPENAI_DATASET_STD
-
 from pycocoevalcap.spice.spice import Spice
 # from pycocoevalcap.meteor.meteor import Meteor
 # from pycocoevalcap.cider.cider import Cider
 # import language_evaluation
 # coco_types=["BLEU", "METEOR", "ROUGE_L", "CIDEr", "SPICE"]
-
+from transformers import AutoConfig
+from transformers import BlipProcessor, BlipForConditionalGeneration
+from corl.open_r1.rewards.bert_score.bert_score_wrapper import BertScoreWrapper, BertSimCSEWrapper
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 from .r_utils import (
     safe_string_equal,
     extract_answer_text_from_qa,
     extract_answer_letter_from_response,
     extract_answer_text_from_response,
-
-    token_level_max_match_similarity
+    token_level_max_match_similarity,
+    soft_jaccard,
 )
 
 
-def transform_image(image):
-    # image: PIL.Image
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-    ])
-    return transform(image).unsqueeze(0)
+class T2ICycleConsistencyReward:
+    def __init__(self, task_args):
+        self.args = task_args
 
+        self.cap_cs_metrics = task_args.caption_cs_metrics
+        self.using_simcse = task_args.using_simcse
+        self.img_cs_metrics = task_args.image_cs_metrics
+        self.using_img_cs = task_args.using_image_cs
+        self.using_external_caption_model = task_args.using_external_caption_model
 
-@torch.inference_mode()
-def t2i_bidirectional_cycle_reward(
-        completions, prompts,
-        caption_model=None, caption_processor=None,
-        bert_scorer=None, lpip_metric=None,
-        **kwargs
-):
-    device = caption_model.device
+        if self.using_img_cs:
+            if "lpips" in self.img_cs_metrics:
+                self.transform = transforms.Compose([
+                    transforms.Resize((224, 224)),
+                    transforms.ToTensor(),
+                ])
+            else:
+                self.transform = transforms.Compose([
+                    transforms.Resize((384, 384)),
+                    transforms.ToTensor()
+                ])
 
-    inputs = caption_processor(
-        images=completions, return_tensors="pt"
-    ).to(device)
-    out = caption_model.generate(**inputs, max_new_tokens=50)
-    gen_captions = caption_processor.batch_decode(out, skip_special_tokens=True)
+        self.blip_model = None
+        self.blip_processor = None
+        self.bert_scorer = None
+        self.lpips_metric = None
 
-    bert_scores = bert_scorer(gen_captions, prompts)['f1'].tolist()
+    @torch.inference_mode()
+    def generate_caption_with_policy_mmgpt(
+            self, images, cap_mmgpt=None, processing_class=None,
+    ):
+        device = cap_mmgpt.device
 
-    rewards = []
-    for idx, (gen_img, real_img) in enumerate(zip(completions, kwargs['real_image'])):
-        lpip_score = lpip_metric(
-            transform_image(gen_img).to(device),
-            transform_image(real_img).to(device)
+        # generate captions
+        # task_instruct = "Generate an accurate visual description of the image in a single sentence."
+        # task_instruct = "Generate a concise and accurate description of the image in one sentence."
+        task_instruct = "Describe the main content of the image in one sentence."
+        _prompts, _images = [], []
+        for img in images:
+            _prompts.append(
+                [
+                    {
+                        "role": "<|User|>",
+                        "content": f"<image_placeholder>\n{task_instruct}",
+                        # "images": [example["image"]],
+                    },
+                    {"role": "<|Assistant|>", "content": ""},
+                ],
+            )
+            _images.append([img])
+
+        prepare_inputs = processing_class(
+            conversations=_prompts, images=_images, force_batchify=True,
+        ).to(device)
+
+        inputs_embeds = cap_mmgpt.prepare_inputs_embeds(**prepare_inputs)
+        outputs = cap_mmgpt.language_model.generate(
+            inputs_embeds=inputs_embeds,
+            attention_mask=prepare_inputs.attention_mask,
+            max_new_tokens=256,
+            do_sample=True,
+            temperature=1,
+            pad_token_id=processing_class.tokenizer.eos_token_id,
+            bos_token_id=processing_class.tokenizer.bos_token_id,
+            eos_token_id=processing_class.tokenizer.eos_token_id,
         )
-        rewards.append(bert_scores[idx] + 1 - lpip_score)
-    return rewards
+        gen_captions = processing_class.tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+        return gen_captions
+
+    @torch.inference_mode()
+    def generate_caption_with_external_model(self, images):
+        device = list(self.blip_model.parameters())[0].device
+
+        inputs = self.blip_processor(images=images, return_tensors="pt").to(device)
+        out = self.blip_model.generate(**inputs, max_new_tokens=50)
+        gen_captions = self.blip_processor.batch_decode(out, skip_special_tokens=True)
+
+        return gen_captions
+
+    @torch.inference_mode()
+    def compute_caption_consistency(self, gen_captions, prompts):
+        if "bertscore" in self.cap_cs_metrics and "jaccard" in self.cap_cs_metrics:
+            if self.using_simcse:
+                bert_score_f1 = self.bert_scorer.compute_simcse(gen_captions, prompts)
+            else:
+                bert_score_f1 = self.bert_scorer.compute_f1(gen_captions, prompts)
+            jaccards = [soft_jaccard(pp, gg) for pp, gg in zip(prompts, gen_captions)]
+            cap_cs_scores = [(a + b) / 2. for a, b in zip(bert_score_f1, jaccards)]
+
+        elif "jaccard" in self.cap_cs_metrics:
+            cap_cs_scores = [soft_jaccard(pp, gg) for pp, gg in zip(prompts, gen_captions)]
+
+        elif "bertscore" in self.cap_cs_metrics:
+            if self.using_simcse:
+                cap_cs_scores = self.bert_scorer.compute_simcse(gen_captions, prompts)
+                cap_cs_scores = [a for a in cap_cs_scores]
+            else:
+                cap_cs_scores = self.bert_scorer.compute_f1(gen_captions, prompts)
+        else:
+            raise NotImplementedError("No valid caption consistency computation.")
+
+        return cap_cs_scores
+
+    @torch.inference_mode()
+    def compute_image_consistency(self, gen_images, gt_images, device):
+        img_cs_scores = []
+        for idx, (gen_img, real_img) in enumerate(zip(gen_images, gt_images)):
+            if "lpips" in self.img_cs_metrics:
+                img_cs_score = 1. - self.lpips_metric(
+                    self.transform(gen_img).to(device).unsqueeze(0),
+                    self.transform(real_img).to(device).unsqueeze(0)
+                )
+            else:  # mse
+                img_cs_score = 1. - metric_F.image.root_mean_squared_error_using_sliding_window(
+                    self.transform(gen_img).to(device).unsqueeze(0),
+                    self.transform(real_img).to(device).unsqueeze(0)
+                )  # near to 1, the better
+            img_cs_scores.append(img_cs_score)
+
+        return img_cs_scores
+
+    def __call__(
+            self, completions, prompts, mmgpt=None, processing_class=None, **kwargs
+    ):
+        device = mmgpt.device
+
+        if self.args.using_external_caption_model:
+            gen_captions = self.generate_caption_with_external_model(completions)
+        else:
+            gen_captions = self.generate_caption_with_policy_mmgpt(
+                completions, cap_mmgpt=mmgpt, processing_class=processing_class
+            )
+        cap_cs_scores = self.compute_caption_consistency(gen_captions, prompts)
+
+        if self.using_img_cs:
+            img_cs_scores = self.compute_image_consistency(completions, kwargs['real_image'], device)
+
+            rewards = [a + b for a, b in zip(cap_cs_scores, img_cs_scores)]
+        else:
+            rewards = cap_cs_scores
+
+        return rewards
+
+    def load_external_model(self, load_device):
+        if self.using_external_caption_model:
+            self.blip_processor = BlipProcessor.from_pretrained(f"{self.args.blip_model_ckpt}")
+            config = AutoConfig.from_pretrained(f"{self.args.blip_model_ckpt}")
+            self.blip_model = BlipForConditionalGeneration(config)
+            checkpoint = torch.load(
+                f"{self.args.blip_model_ckpt}/pytorch_model.bin", map_location='cpu')
+            self.blip_model.load_state_dict(checkpoint, strict=False)
+            for param in self.blip_model.parameters():
+                param.requires_grad = False
+
+            self.blip_model = self.blip_model.to(load_device)
+            self.blip_model = self.blip_model.eval()
+
+        if "bertscore" in self.cap_cs_metrics:
+            if self.using_simcse:
+                self.bert_scorer = BertSimCSEWrapper(
+                    f"{self.args.model_ckpt_dir}/sup-simcse-bert-base-uncased")
+                print(f"loaded: sup-simcse-bert-base-uncased")
+            else:
+                self.bert_scorer = BertScoreWrapper(f"{self.args.model_ckpt_dir}/all-mpnet-base-v2")
+                print(f"loaded: all-mpnet-base-v2")
+
+        if self.using_img_cs and "lpips" in self.img_cs_metrics:
+            self.lpips_metric = LearnedPerceptualImagePatchSimilarity(
+                net_type='vgg', normalize=True
+            ).to(load_device)
+            self.lpips_metric = self.lpips_metric.eval()
+            print(f"loaded: lpips")
+
+    @property
+    def __name__(self):
+        return 't2i_CycleConsistency'
 
 
 @torch.inference_mode()
@@ -89,7 +232,7 @@ def t2i_match_reward(
     )
 
     all_embeds = outputs.last_hidden_state  # [bs*n, , dim]
-    image_embeds = all_embeds[:, 5: 5+576]
+    image_embeds = all_embeds[:, 5: 5 + 576]
     text_embeds = all_embeds[:, 586:, :]
     text_masks = prepare_inputs.attention_mask[:, 586:]
 
@@ -359,7 +502,7 @@ def t2i_clip_reward(
 
     text_features = clip_tokenizer(prompts).to(device)
     text_features = clip_model.encode_text(text_features)
-    text_features /= text_features.norm(dim=-1, keepdim=True)   # [B, 1024]
+    text_features /= text_features.norm(dim=-1, keepdim=True)  # [B, 1024]
 
     rewards = []
     for image, text in zip(image_features, text_features):
@@ -370,7 +513,7 @@ def t2i_clip_reward(
 
 
 @torch.inference_mode()
-def t2i_cycle_consistency_reward(
+def t2i_cap_consistency_reward(
         completions, prompts,
         caption_model=None, caption_processor=None, bert_scorer=None,
         **kwargs
@@ -413,10 +556,10 @@ def t2i_cycle_consistency_reward(
     return rewards
 
 
-from .r_od import (
-    accuracy_reward_iou,
-    accuracy_reward_confidence,
-)
+# from .r_od import (
+#     accuracy_reward_iou,
+#     accuracy_reward_confidence,
+# )
 @torch.inference_mode()
 def t2i_obj_det_reward(
         completions,
@@ -456,4 +599,3 @@ def t2i_obj_det_reward(
     # od rewards
     rewards = []
     return rewards
-

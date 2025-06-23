@@ -6,13 +6,12 @@ from .r_base import (
 )
 from .r_t2i import (
     t2i_clip_reward,
-    t2i_cycle_consistency_reward,
-    t2i_bidirectional_cycle_reward,
+    T2ICycleConsistencyReward,
     t2i_match_reward,
     t2i_pixel_mse_reward,
     t2i_qa_reward,
-    t2i_obj_det_reward,
     t2i_obj_cls_reward,
+    t2i_obj_det_reward,
 )
 
 reward_funcs_registry = {
@@ -25,11 +24,10 @@ reward_funcs_registry = {
     "oc_accuracy": common_cls_accuracy_reward,
 
     # text-to-image generation
-    "t2i_clip_reward": t2i_clip_reward,
-    "t2i_cycle_reward": t2i_cycle_consistency_reward,
-    "t2i_bid_cycle_reward": t2i_bidirectional_cycle_reward,
+    "t2i_bid_cycle_reward": "t2i_CycleConsistency",
     "t2i_ti_sim": t2i_match_reward,
     "t2i_pixel_mse": t2i_pixel_mse_reward,
+    "t2i_clip_reward": t2i_clip_reward,
     "t2i_qa": t2i_qa_reward,
     "t2i_oc": t2i_obj_cls_reward,
     "t2i_od": t2i_obj_det_reward,

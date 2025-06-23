@@ -33,67 +33,106 @@ def think_mark_num(text):
     return reward
 
 
-# ******************* ******************* *******************
+# *********************************************************
 def common_qa_accuracy_reward(completions, qa_solution, **kwargs):
-    # contents = [completion[0]["content"] for completion in completions]
+    mcq_extractor = MCQAnswerExtractor()
 
     rewards = []
     for idx, (content, sol) in enumerate(zip(completions, qa_solution)):
-        content = str(content)
-        sol = str(sol)
+        content = str(content).strip()
+        sol = str(sol).strip()
 
         reward = 0.0
+
         # Extract GT answer from solution if it has think/answer tags [always satisfy]
         sol_match = re.search(r"<answer>(.*?)</answer>", sol)
         ground_truth = sol_match.group(1).strip() if sol_match else sol.strip()
 
-        # Extract predicted answers from content if it has think/answer tags
-        content_match = re.search(r"<answer>(.*?)</answer>", content)
-        if content_match:
-            student_answer = content_match.group(1).strip()
+        if kwargs['qa_type'] == 'MC':  # FIXME:
+            student_answer = mcq_extractor.extract_answer(content)
+
+            if student_answer is not None:
+                if safe_string_equal(student_answer, ground_truth):
+                    reward = 1.0
         else:
-            # remove <think>.*?</think>
-            student_answer = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
-            # student_answer = re.sub(r'<think>.*', '', student_answer, flags=re.DOTALL)
-            # student_answer = re.sub(r'.*</think>', '', student_answer, flags=re.DOTALL)
+            content_match = re.search(r"<answer>(.*?)</answer>", content)
+            student_answer = content_match.group(1).strip() if content_match else content.strip()
             student_answer = student_answer.replace(
                 '<think>', '').replace('</think>', '').replace(
                 '<answer>', '').replace('</answer>', '').replace(
-                'Answer:', '').replace('Answer', '').strip()
+                'Answer:', '').strip()
 
-        if safe_string_equal(student_answer, ground_truth):
-            reward = 1.0
-        else:
-            if kwargs['qa_type'] == 'MC':  # FIXME: for multi-choice qa
-                if len(student_answer) <= 2:  # prediction is option letter (A | A. | A:)
-                    if safe_string_equal(student_answer, ground_truth):
-                        reward = 1.0
-                else:  # e.g., <option letter + answer text>, <answer text>, <The answer is xx>
-                    # correct letter in prediction, but others may also be in
-                    if bool(re.search(rf'\b{re.escape(ground_truth)}\b', student_answer)):
-                        student_answer = extract_answer_letter_from_response(student_answer)
-                        if len(student_answer) <= 2:  # option letter
-                            if safe_string_equal(student_answer, ground_truth):
-                                reward = 1.0
-                    else:
-                        gt_text = extract_answer_text_from_qa(kwargs['qa_problem'][idx], ground_truth)
-                        if bool(re.search(rf'\b{re.escape(gt_text)}\b', student_answer)):
-                            student_answer = extract_answer_text_from_response(student_answer)
-                            if safe_string_equal(student_answer, gt_text):
-                                reward = 1.0
+            if safe_string_equal(student_answer, ground_truth):
+                reward = 1.0
             else:
                 # reward = word_jaccard(student_answer.rstrip('.,!?'), ground_truth)
                 reward = soft_jaccard(student_answer.rstrip('.,!?'), ground_truth)
 
         rewards.append(reward)
-        # print(f"{'=' * 160}")
-        # print(f"------------- Accuracy reward: {reward} -------------\n")
-        # print(f"Prompt: {kwargs['prompts'][idx]}\n")
-        # print(f"Content: {content}\n")
-        # print(f"Solution: {sol}\n")
-        # print(f"{'=' * 160}")
 
     return rewards
+
+
+# def common_qa_accuracy_reward(completions, qa_solution, **kwargs):
+#     # contents = [completion[0]["content"] for completion in completions]
+#
+#     rewards = []
+#     for idx, (content, sol) in enumerate(zip(completions, qa_solution)):
+#         content = str(content)
+#         sol = str(sol)
+#
+#         reward = 0.0
+#         # Extract GT answer from solution if it has think/answer tags [always satisfy]
+#         sol_match = re.search(r"<answer>(.*?)</answer>", sol)
+#         ground_truth = sol_match.group(1).strip() if sol_match else sol.strip()
+#
+#         # Extract predicted answers from content if it has think/answer tags
+#         content_match = re.search(r"<answer>(.*?)</answer>", content)
+#         if content_match:
+#             student_answer = content_match.group(1).strip()
+#         else:
+#             # remove <think>.*?</think>
+#             student_answer = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
+#             # student_answer = re.sub(r'<think>.*', '', student_answer, flags=re.DOTALL)
+#             # student_answer = re.sub(r'.*</think>', '', student_answer, flags=re.DOTALL)
+#             student_answer = student_answer.replace(
+#                 '<think>', '').replace('</think>', '').replace(
+#                 '<answer>', '').replace('</answer>', '').replace(
+#                 'Answer:', '').replace('Answer', '').strip()
+#
+#         if safe_string_equal(student_answer, ground_truth):
+#             reward = 1.0
+#         else:
+#             if kwargs['qa_type'] == 'MC':  # FIXME: for multi-choice qa
+#                 if len(student_answer) <= 2:  # prediction is option letter (A | A. | A:)
+#                     if safe_string_equal(student_answer, ground_truth):
+#                         reward = 1.0
+#                 else:  # e.g., <option letter + answer text>, <answer text>, <The answer is xx>
+#                     # correct letter in prediction, but others may also be in
+#                     if bool(re.search(rf'\b{re.escape(ground_truth)}\b', student_answer)):
+#                         student_answer = extract_answer_letter_from_response(student_answer)
+#                         if len(student_answer) <= 2:  # option letter
+#                             if safe_string_equal(student_answer, ground_truth):
+#                                 reward = 1.0
+#                     else:
+#                         gt_text = extract_answer_text_from_qa(kwargs['qa_problem'][idx], ground_truth)
+#                         if bool(re.search(rf'\b{re.escape(gt_text)}\b', student_answer)):
+#                             student_answer = extract_answer_text_from_response(student_answer)
+#                             if safe_string_equal(student_answer, gt_text):
+#                                 reward = 1.0
+#             else:
+#                 # reward = word_jaccard(student_answer.rstrip('.,!?'), ground_truth)
+#                 reward = soft_jaccard(student_answer.rstrip('.,!?'), ground_truth)
+#
+#         rewards.append(reward)
+#         # print(f"{'=' * 160}")
+#         # print(f"------------- Accuracy reward: {reward} -------------\n")
+#         # print(f"Prompt: {kwargs['prompts'][idx]}\n")
+#         # print(f"Content: {content}\n")
+#         # print(f"Solution: {sol}\n")
+#         # print(f"{'=' * 160}")
+#
+#     return rewards
 
 
 def common_cls_accuracy_reward(completions, cls_solution, **kwargs):
