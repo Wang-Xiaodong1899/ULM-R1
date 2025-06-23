@@ -70,7 +70,7 @@ bash ttrl/scripts/mm2t_mmstar.sh
 |              | MMMU | MMStar |
 |:------------:|:----:|:------:|
 | Janus-Pro-1B | 36.3 |  43.1  |
-|    + TTRL    | 39.8 |        |
+|    + TTRL    | 39.8 |  46.9  |
 
 ### text-to-image generation
 ```shell
