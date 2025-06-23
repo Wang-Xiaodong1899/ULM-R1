@@ -129,15 +129,12 @@ if __name__ == "__main__":
 
     # **********************************************************************
 
-    # img_dir = "/Volumes/T9/mllm_ws/playground/data/eval_ds/eval_images"
-    #
-    # data_path = "/Volumes/T9/mllm_ws/playground/data/eval_ds/corvid_eval/wemath/testmini.json"
-    # save_dir = "ttrl/data/wemath/"
-    #
-    # # data_path = "/Volumes/T9/mllm_ws/playground/data/eval_ds/corvid_eval/mmmu/val.json"
+    # img_dir = "eval/mm2t/mmmu/"
+    # # data_path = "eval/mm2t/mmmu/val.json"
     # # save_dir = "ttrl/data/mmmu/"
-    #
-    # # data_path = "/Volumes/T9/mllm_ws/playground/data/eval_ds/corvid_eval/mmstar/test.json"
+
+    # img_dir = "eval/mm2t/mmstar/"
+    # # data_path = "eval/mm2t/mmstar/test.json"
     # # save_dir = "ttrl/data/mmstar/"
     #
     # main_mm2t(data_path, save_dir, img_dir)
