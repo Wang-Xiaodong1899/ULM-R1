@@ -54,11 +54,15 @@ N_CHUNKS=8
 for i in $(seq 0 $(($N_CHUNKS - 1))); do
     echo "Launching process for GPU $i (chunk index $i of $N_CHUNKS)"
     CUDA_VISIBLE_DEVICES=$i python eval/uni_infer_janus.py \
-    --model_path ${SAVE_PATH} \
-    --index $i \
-    --n_chunks $N_CHUNKS &
+      --model_path ${SAVE_PATH} \
+      --index $i \
+      --n_chunks $N_CHUNKS &
 done
 
 wait
+
+# compute scores
+python eval/uni_infer_janus.py --model_path ${SAVE_PATH} --merge_only --n_chunks $N_CHUNKS
+
 echo "All processes finished."
 # ******************************************************************** #

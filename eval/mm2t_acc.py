@@ -1,5 +1,4 @@
 import argparse
-import os
 import glob
 from tqdm import tqdm
 from eval.utils import load_json, save_json
@@ -43,7 +42,7 @@ def main(args):
         }
     }
 
-    output_file = f"{args.model_path.split('/')[-1]}_result.jsonl"
+    output_file = f"{args.model_path}/{args.model_path.split('/')[-1]}_result.jsonl"
     save_json(output, output_file)
 
 

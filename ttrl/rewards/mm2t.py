@@ -80,54 +80,54 @@ def mcq_ttrl_reward(
     return rewards
 
 
-# def mcq_accuracy_reward(completions, **kwargs):
-#     # answer extraction
-#     extractor = MCQAnswerExtractor()
-#     extracted_answers = []
-#     for content in completions:
-#         content = str(content).strip()
-#         # student_answer = extract_mcq_answer(content)
-#         student_answer = extractor.extract_answer(content)
-#         extracted_answers.append(student_answer)
-#
-#     assert len(extracted_answers) == len(completions)
-#
-#     # compute rewards
-#     num_generations = kwargs['num_generations']
-#     batch_size = len(completions) // num_generations
-#     if batch_size < 1:
-#         batch_size = 1
-#     # prompts = kwargs['prompts']
-#
-#     rewards_hits = []
-#     rewards = []
-#     for bs in range(batch_size):
-#         extracted_answers_batch = extracted_answers[bs * num_generations:(bs + 1) * num_generations]
-#         gt_labels_batch = kwargs['gt_labels'][bs * num_generations:(bs + 1) * num_generations]
-#
-#         valid_answers = [a for a in extracted_answers_batch if a is not None]
-#
-#         if not valid_answers:
-#             # return rewards.extend([-1] * num_generations)
-#             return rewards.extend([0] * num_generations)
-#
-#         # majority voting
-#         counter = Counter(valid_answers)
-#         majority_answer, majority_count = counter.most_common(1)[0]
-#
-#         for idx, answer in enumerate(extracted_answers_batch):
-#             if majority_answer == gt_labels_batch[idx]:
-#                 rewards_hits.append(1)
-#             else:
-#                 rewards_hits.append(0)
-#
-#             if answer is None:
-#                 rewards.append(0)
-#                 # rewards.append(-1)
-#             else:
-#                 rewards.append(1 if answer == majority_answer else 0)
-#
-#     rewards_hit_rate = sum(rewards_hits) / len(rewards_hits)
-#     print(f'\033[40;32mreward_accuracy: {100*rewards_hit_rate:.2f}%\033[0m')
-#
-#     return rewards
+def mcq_accuracy_reward(completions, **kwargs):
+    # answer extraction
+    extractor = MCQAnswerExtractor()
+    extracted_answers = []
+    for content in completions:
+        content = str(content).strip()
+        # student_answer = extract_mcq_answer(content)
+        student_answer = extractor.extract_answer(content)
+        extracted_answers.append(student_answer)
+
+    assert len(extracted_answers) == len(completions)
+
+    # compute rewards
+    num_generations = kwargs['num_generations']
+    batch_size = len(completions) // num_generations
+    if batch_size < 1:
+        batch_size = 1
+    # prompts = kwargs['prompts']
+
+    rewards_hits = []
+    rewards = []
+    for bs in range(batch_size):
+        extracted_answers_batch = extracted_answers[bs * num_generations:(bs + 1) * num_generations]
+        gt_labels_batch = kwargs['gt_labels'][bs * num_generations:(bs + 1) * num_generations]
+
+        valid_answers = [a for a in extracted_answers_batch if a is not None]
+
+        if not valid_answers:
+            # return rewards.extend([-1] * num_generations)
+            return rewards.extend([0] * num_generations)
+
+        # majority voting
+        counter = Counter(valid_answers)
+        majority_answer, majority_count = counter.most_common(1)[0]
+
+        for idx, answer in enumerate(extracted_answers_batch):
+            if majority_answer == gt_labels_batch[idx]:
+                rewards_hits.append(1)
+            else:
+                rewards_hits.append(0)
+
+            if answer is None:
+                rewards.append(0)
+                # rewards.append(-1)
+            else:
+                rewards.append(1 if answer == majority_answer else 0)
+
+    rewards_hit_rate = sum(rewards_hits) / len(rewards_hits)
+    print(f'\033[40;32mreward_accuracy: {100*rewards_hit_rate:.2f}%\033[0m')
+
+    return rewards
