@@ -479,11 +479,14 @@ def uni_eval(generate, understand, uni_bench, save_path='', img_num=4):
 
             save_json(text_record, os.path.join(save_dir, 'text_records.json'))
 
-    uniScores = statistics(records, uni_bench)
-    if save_path != '':
-        open(os.path.join(save_path, 'results.json'), 'w').write(json.dumps(uniScores, indent=4))
-
     return records
+    # uniScores = statistics(records, uni_bench)
+    #
+    # if save_path != '':
+    #     result_save_path = save_path.replace(save_path.split('/')[-1], '')
+    #     open(os.path.join(result_save_path, 'results.json'), 'w').write(json.dumps(uniScores, indent=4))
+    #
+    # return records
 
 
 # Setting seeds helps with reproducibility.
