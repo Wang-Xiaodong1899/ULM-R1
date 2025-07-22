@@ -5,12 +5,12 @@ import argparse
 import numpy as np
 from PIL import Image
 import torch
-from transformers import AutoModelForCausalLM
 
+from transformers import AutoModelForCausalLM
 from janus.models import VLChatProcessor
 from janus.utils.io import load_pil_images
-from eval.t2i.UniEval.uni_eval import uni_eval
-from eval.utils import load_json
+from eval.t2i.UniEval.uni_eval import uni_eval, statistics
+from eval.utils import load_json, save_json
 from ttrl.rewards.mm2t import MCQAnswerExtractor
 
 
@@ -201,9 +201,26 @@ def main(args):
     uni_bench = load_json(args.eval_data)
     uni_bench_current = get_chunk(uni_bench, args.n_chunks, args.index)
 
-    uni_eval(
+    records = uni_eval(
         eval_model.t2i_generation, eval_model.understand, uni_bench_current, args.save_img_path,
     )
+    save_json(records, os.path.join(args.model_path, f'records_rank_{args.index}.json'))
+    print(f"Saved records for rank {args.index}")
+
+
+def compute_scores(args):
+    uni_bench = load_json(args.eval_data)
+    print(f"len(uni_bench): {len(uni_bench)}")
+
+    records = []
+    for idx in range(args.n_chunks):
+        _records = load_json(f"{args.model_path}/records_rank_{idx}.json")
+        print(f"records_rank_{idx}: {len(_records)}")
+        records.extend(_records)
+    print(f"len(records): {len(records)}")
+
+    uniScores = statistics(records, uni_bench)
+    save_json(uniScores, os.path.join(args.model_path, "results.json"))
 
 
 if __name__ == "__main__":
@@ -225,7 +242,11 @@ if __name__ == "__main__":
         "--index", type=int, default=0, help="Chunk index to process (0-indexed)")
     parser.add_argument(
         "--n_chunks", type=int, default=1, help="Total number of chunks")
+    parser.add_argument("--merge_only", action="store_true", help="Only merge existing results")
 
     args_main = parser.parse_args()
 
-    main(args_main)
+    if args_main.merge_only:
+        compute_scores(args_main)
+    else:
+        main(args_main)
