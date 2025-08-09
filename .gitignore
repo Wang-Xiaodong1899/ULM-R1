@@ -129,3 +129,9 @@ tests/e2e/toy_examples/deepspeed/synchronous/output.txt
 logs
 log
 outputs
+experiments/
+*.jpg
+XXX/
+*.json
+*.csv
+corl/

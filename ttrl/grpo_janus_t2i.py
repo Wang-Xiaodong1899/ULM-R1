@@ -85,10 +85,10 @@ class GRPOScriptArguments(ScriptArguments):
         metadata={"help": "."},
     )
     model_ckpt_dir: str = field(
-        default="XXX/checkpoint/"
+        default="/mnt/bn/wxd-video-understanding/wangxd/models/"
     )
     blip_model_ckpt: str = field(
-        default="XXX/checkpoint/blip-image-captioning-base"
+        default="/mnt/bn/wxd-video-understanding/wangxd/models/blip-image-captioning-base"
     )
     dataset_cache_dir: str = field(
         default="XXX/data/cache/"

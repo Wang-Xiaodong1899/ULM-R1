@@ -3,7 +3,7 @@
 # required: trl>=0.18.1
 
 # ******************************************************************** #
-CKPT_PATH=XXX/checkpoint/Janus-Pro-1B
+CKPT_PATH=/mnt/bn/wxd-video-understanding/wangxd/models/Janus-Pro-1B
 DATA_PATH=ttrl/data/mmmu
 SAVE_DIR=XXX/experiment/JanusPro-1B-TTRL-MM2T
 

@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # *****************  ***************** #
-CKPT_PATH=path/to/checkpoint/Janus-Pro-1B
-DATA_PATH=path/to/data/x2x_rft_22k
+CKPT_PATH=/mnt/bn/wxd-video-understanding/wangxd/models/Janus-Pro-1B
+DATA_PATH=/mnt/bn/wxd-video-understanding/wangxd/ULM-R1/data/x2x_rft_16k
 
 task_format=unify
-SAVE_DIR=path/to/experiment/JanusPro-1B-CoRL-Unified
+SAVE_DIR=/mnt/bn/wxd-video-understanding/wangxd/ULM-R1/experiments/JanusPro-1B-CoRL-Unified
 
 reward_funcs="t2i_bid_cycle_reward t2i_ti_sim qa_accuracy format"
 #beta=0.04
@@ -23,7 +23,7 @@ num_generation=8
 gradient_accumulation_steps=4
 per_device_train_batch_size=1
 
-SAVE_PATH=${SAVE_DIR}/RFT22k-CycleMatchAccFormat-UniReward-G8-beta004-bs16
+SAVE_PATH=${SAVE_DIR}/RFT22k-CycleMatchAccFormat-UniReward-use-blip-G8-beta004-bs16
 mkdir -p $SAVE_PATH
 cp $0 $SAVE_PATH/run.sh
 
@@ -38,7 +38,7 @@ torchrun --nproc_per_node="8" \
     --output_dir ${SAVE_PATH}  \
     --model_name_or_path ${CKPT_PATH} \
     --dataset_name ${DATA_PATH} \
-    --report_to wandb \
+    --report_to swanlab \
     --logging_steps 1 \
     --unify_advantage $unify_advantage \
     --unify_reward $unify_reward \
@@ -56,5 +56,6 @@ torchrun --nproc_per_node="8" \
     --gradient_checkpointing false \
     --save_steps 200 \
     --save_total_limit 1 \
-    --save_only_model true
+    --save_only_model true \
+    --using_external_caption_model true \
 

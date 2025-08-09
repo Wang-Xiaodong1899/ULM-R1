@@ -156,8 +156,10 @@ class T2ICycleConsistencyReward:
             gen_captions = self.generate_caption_with_policy_mmgpt(
                 completions, cap_mmgpt=mmgpt, processing_class=processing_class
             )
+        # R(cap(gen_image), prompt)
         cap_cs_scores = self.compute_caption_consistency(gen_captions, prompts)
 
+        # R(gen_image, real_image)
         if self.using_img_cs:
             img_cs_scores = self.compute_image_consistency(completions, kwargs['real_image'], device)
 

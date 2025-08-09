@@ -277,7 +277,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--model_path", type=str,
-        default="XXX/checkpoint/Janus-Pro-1B",
+        default="/mnt/bn/wxd-video-understanding/wangxd/models/Janus-Pro-1B",
     )
     parser.add_argument(
         "--eval_data", type=str,
