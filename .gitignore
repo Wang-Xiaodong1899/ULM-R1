@@ -131,7 +131,13 @@ log
 outputs
 experiments/
 *.jpg
+*.png
 XXX/
 *.json
 *.csv
 corl/
+project/WISE/janus-pro-1B-wise/
+project/WISE/janus-pro-1B/
+project/WISE/data/
+data/
+swanlog/

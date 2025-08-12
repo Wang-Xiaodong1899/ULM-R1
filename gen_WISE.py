@@ -8,13 +8,15 @@ import threading
 from queue import Queue
 import json
 from tqdm import tqdm
+import argparse
 
 # 全局变量，用于存储模型和处理器（避免重复加载）
 global_models = {}
 model_lock = threading.Lock()
 SAVE_DIR = "/mnt/bn/wxd-video-understanding/wangxd/ULM-R1/project/WISE/janus-pro-1B-wise/"
 
-def init_model(gpu_id):
+def init_model(gpu_id, args):
+    model_path = args.model_path
     with model_lock:
         if gpu_id not in global_models:
             torch.cuda.set_device(gpu_id)
@@ -35,9 +37,9 @@ def init_model(gpu_id):
             }
     return global_models[gpu_id]
 
-def worker(gpu_id, prompt_queue):
+def worker(gpu_id, prompt_queue, args):
     # 初始化模型
-    model_info = init_model(gpu_id)
+    model_info = init_model(gpu_id, args)
     vl_gpt = model_info['model']
     vl_chat_processor = model_info['processor']
     
@@ -68,7 +70,7 @@ def worker(gpu_id, prompt_queue):
             prompt = sft_format + vl_chat_processor.image_start_tag
             
             # 生成图像
-            generate(vl_gpt, vl_chat_processor, prompt, prompt_data["prompt_id"], gpu_id)
+            generate(vl_gpt, vl_chat_processor, prompt, prompt_data["prompt_id"], gpu_id, args=args)
             
             print(f"Worker {worker_id} (GPU {gpu_id}) processed prompt_id {prompt_data['prompt_id']}")
         except Exception as e:
@@ -89,6 +91,7 @@ def generate(
     image_token_num_per_image: int = 576,
     img_size: int = 384,
     patch_size: int = 16,
+    args=None,
 ):
     input_ids = vl_chat_processor.tokenizer.encode(prompt)
     input_ids = torch.LongTensor(input_ids)
@@ -130,13 +133,19 @@ def generate(
     visual_img = np.zeros((parallel_size, img_size, img_size, 3), dtype=np.uint8)
     visual_img[:, :, :] = dec
 
-    os.makedirs(SAVE_DIR, exist_ok=True)
-    save_path = os.path.join(SAVE_DIR, f"{prompt_id}.png")
+    os.makedirs(args.save_dir, exist_ok=True)
+    save_path = os.path.join(args.save_dir, f"{prompt_id}.png")
     PIL.Image.fromarray(visual_img[0]).save(save_path)
 
 if __name__ == '__main__':
+    args = argparse.ArgumentParser()
+    args.add_argument("--model_path", type=str, default=None)
+    args.add_argument("--save_dir", type=str, default=None)
+    args = args.parse_args()
+
     # 指定模型路径
-    model_path = "/mnt/bn/wxd-video-understanding/wangxd/ULM-R1/experiments/JanusPro-1B-CoRL-Unified/RFT22k-CycleMatchAccFormat-UniReward-G8-beta004-bs16"
+    # model_path = "/mnt/bn/wxd-video-understanding/wangxd/ULM-R1/experiments/JanusPro-1B-CoRL-Unified/RFT22k-CycleMatchAccFormat-UniReward-G8-beta004-bs16"
+    # model_path = "/mnt/bn/wxd-video-understanding/wangxd/models/Janus-Pro-1B"
     
     # 加载prompt列表
     with open('/mnt/bn/wxd-video-understanding/wangxd/ULM-R1/project/WISE/data/cultural_common_sense.json', 'r') as f:
@@ -153,7 +162,7 @@ if __name__ == '__main__':
     
     # 配置GPU分配 [0,0,1,1,2,2,3] 表示:
     # GPU0上运行2个worker, GPU1上运行2个worker, GPU2上运行2个worker, GPU3上运行1个worker
-    gpu_assignments = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7]
+    gpu_assignments = [0, 1, 2, 3, 4, 5, 6, 7]
     
     # 创建任务队列
     prompt_queue = Queue()
@@ -173,7 +182,7 @@ if __name__ == '__main__':
             
         t = threading.Thread(
             target=worker,
-            args=(gpu_id, prompt_queue)
+            args=(gpu_id, prompt_queue, args)
         )
         t.start()
         threads.append(t)
