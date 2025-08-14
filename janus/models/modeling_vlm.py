@@ -193,6 +193,7 @@ class MultiModalityPreTrainedModel(PreTrainedModel):
     base_model_prefix = "multi_modality"
     _no_split_modules = []
     _skip_keys_device_placement = "past_key_values"
+    supports_gradient_checkpointing = True
 
 
 class MultiModalityCausalLM(MultiModalityPreTrainedModel):
@@ -321,12 +322,18 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
                     pixel_values=mm2t_pixel_values,
                     images_emb_mask=mm2t_images_emb_mask,
                 )
+            # return self.language_model(
+            #     inputs_embeds=mm2t_inputs_embeds,
+            #     attention_mask=mm2t_attention_mask,
+            #     labels=labels,
+            #     logits_to_keep=mm2t_logits_to_keep
+            # )
             return self.language_model(
                 inputs_embeds=mm2t_inputs_embeds,
                 attention_mask=mm2t_attention_mask,
                 labels=labels,
                 logits_to_keep=mm2t_logits_to_keep
-            )
+            ).logits
 
         elif task == "generation":
             if t2i_inputs_embeds is None:
@@ -356,15 +363,16 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
 
             logits = self.gen_head(hidden_states[:, -t2i_logits_to_keep:, :]).contiguous()
 
-            return CausalLMOutputWithPast(
-                # loss=loss,
-                logits=logits,
-                # logits=all_logits,
-                past_key_values=outputs.past_key_values,
-                hidden_states=outputs.hidden_states,
-                # hidden_states=hidden_states,
-                attentions=outputs.attentions,
-            )
+            return logits
+            # return CausalLMOutputWithPast(
+            #     # loss=loss,
+            #     logits=logits,
+            #     # logits=all_logits,
+            #     past_key_values=outputs.past_key_values,
+            #     hidden_states=outputs.hidden_states,
+            #     # hidden_states=hidden_states,
+            #     attentions=outputs.attentions,
+            # )
 
         else:  # joint
             if mm2t_inputs_embeds is None:

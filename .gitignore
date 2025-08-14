@@ -135,10 +135,12 @@ experiments/
 XXX/
 *.json
 *.csv
-corl/
 project/WISE/janus-pro-1B-wise/
 project/WISE/janus-pro-1B/
 project/WISE/data/
 data/
 swanlog/
 project/UniEval/records
+corl/bin/
+corl/lib64
+corl/pyvenv.cfg
