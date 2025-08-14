@@ -207,7 +207,7 @@ def main():
     #     openai.api_base = cfg['api_base']
     # openai == 0.28.0
     openai.api_base = "https://api.shubiaobiao.cn/v1"
-    openai.api_key = "sk-j39KGi7DXHUkHipN18D34a12E3Aa4d868b9c6dF8371c0e67"
+    openai.api_key = os.environ["OPENAI_API_KEY"]
 
     prompts = load_prompts(cfg["json_path"])
 
